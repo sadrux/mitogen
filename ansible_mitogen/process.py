@@ -34,6 +34,11 @@ import signal
 import socket
 import sys
 
+try:
+    import faulthandler
+except ImportError:
+    faulthandler = None
+
 import mitogen
 import mitogen.core
 import mitogen.debug
@@ -50,6 +55,13 @@ from mitogen.core import b
 
 
 LOG = logging.getLogger(__name__)
+
+
+def getenv_int(key, default=0):
+    try:
+        return int(os.environ.get(key, str(default)))
+    except ValueError:
+        return default
 
 
 class MuxProcess(object):
@@ -109,6 +121,9 @@ class MuxProcess(object):
         if cls.worker_sock is not None:
             return
 
+        if faulthandler is not None:
+            faulthandler.enable()
+
         cls.unix_listener_path = mitogen.unix.make_socket_path()
         cls.worker_sock, cls.child_sock = socket.socketpair()
         mitogen.core.set_cloexec(cls.worker_sock.fileno())
@@ -143,6 +158,15 @@ class MuxProcess(object):
         # Block until the socket is closed, which happens on parent exit.
         mitogen.core.io_op(self.child_sock.recv, 1)
 
+    def _enable_router_debug(self):
+        if 'MITOGEN_ROUTER_DEBUG' in os.environ:
+            self.router.enable_debug()
+
+    def _enable_stack_dumps(self):
+        secs = getenv_int('MITOGEN_DUMP_THREAD_STACKS', default=0)
+        if secs:
+            mitogen.debug.dump_to_logger(secs=secs)
+
     def _setup_master(self):
         """
         Construct a Router, Broker, and mitogen.unix listener
@@ -156,10 +180,8 @@ class MuxProcess(object):
             router=self.router,
             path=self.unix_listener_path,
         )
-        if 'MITOGEN_ROUTER_DEBUG' in os.environ:
-            self.router.enable_debug()
-        if 'MITOGEN_DUMP_THREAD_STACKS' in os.environ:
-            mitogen.debug.dump_to_logger()
+        self._enable_router_debug()
+        self._enable_stack_dumps()
 
     def _setup_services(self):
         """
@@ -174,7 +196,7 @@ class MuxProcess(object):
                 ansible_mitogen.services.ContextService(self.router),
                 ansible_mitogen.services.ModuleDepService(self.router),
             ],
-            size=int(os.environ.get('MITOGEN_POOL_SIZE', '16')),
+            size=getenv_int('MITOGEN_POOL_SIZE', default=16),
         )
         LOG.debug('Service pool configured: size=%d', self.pool.size)
 
