@@ -1384,20 +1384,37 @@ class RouteMonitor(object):
             policy=is_immediate_child,
         )
 
-    def propagate(self, handle, target_id, name=None):
-        # self.parent is None in the master.
-        if not self.parent:
-            return
-
+    def _propagate_one(self, handle, stream, target_id, name):
         data = str(target_id)
         if name:
             data = '%s:%s' % (target_id, mitogen.core.b(name))
-        self.parent.send(
+        stream.send(
             mitogen.core.Message(
                 handle=handle,
+                dst_id=stream.remote_id,
                 data=data.encode('utf-8'),
             )
         )
+
+    def propagate(self, handle, target_id, name=None):
+        # self.parent is None in the master.
+        if self.parent:
+            self._propagate_one(
+                handle,
+                self.router.stream_by_id(self.parent.context_id),
+                target_id,
+                name,
+            )
+
+        # Inform any non-parent stream that ever sent a message to the target
+        # that it is going away. This happens recursively at each parent until
+        # every child that ever communicated with it knows it's gone.
+        for stream in list(self.router._stream_by_id.values()):
+            if self.parent and stream.remote_id == self.parent.context_id:
+                continue
+            if target_id in stream.egress_ids:
+                self._propagate_one(handle, stream, target_id, name)
+                stream.egress_ids.discard(target_id)
 
     def notice_stream(self, stream):
         """
@@ -1461,7 +1478,11 @@ class RouteMonitor(object):
             return
 
         LOG.debug('Deleting route to %d via %r', target_id, stream)
-        stream.routes.discard(target_id)
+        if hasattr(stream, 'routes'):
+            # TODO: core.Stream lacks routes attr, and does not grow one after
+            # upgrade_router(). Instead move routing state into the
+            # RouteMonitor class, instead of spreading it around other classes.
+            stream.routes.discard(target_id)
         self.router.del_route(target_id)
         self.propagate(mitogen.core.DEL_ROUTE, target_id)
         context = self.router.context_by_id(target_id, create=False)
@@ -1517,11 +1538,9 @@ class Router(mitogen.core.Router):
 
     def del_route(self, target_id):
         LOG.debug('%r.del_route(%r)', self, target_id)
-        try:
-            del self._stream_by_id[target_id]
-        except KeyError:
-            LOG.error('%r: cant delete route to %r: no such stream',
-                      self, target_id)
+        # We may receive DEL_ROUTE for contexts we never had an explicit route
+        # for, via the egress_ids mechanism.
+        self._stream_by_id.pop(target_id, None)
 
     def get_module_blacklist(self):
         if mitogen.context_id == 0:
@@ -1536,10 +1555,10 @@ class Router(mitogen.core.Router):
     def allocate_id(self):
         return self.id_allocator.allocate()
 
-    def context_by_id(self, context_id, via_id=None, create=True):
+    def context_by_id(self, context_id, name=None, via_id=None, create=True):
         context = self._context_by_id.get(context_id)
         if create and not context:
-            context = self.context_class(self, context_id)
+            context = self.context_class(self, context_id, name)
             if via_id is not None:
                 context.via = self.context_by_id(via_id)
             self._context_by_id[context_id] = context

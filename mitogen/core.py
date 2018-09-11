@@ -1062,10 +1062,16 @@ class Stream(BasicStream):
     #: :data:`mitogen.parent_ids`.
     is_privileged = False
 
+    name = u'default'
+
     def __init__(self, router, remote_id, **kwargs):
         self._router = router
         self.remote_id = remote_id
-        self.name = u'default'
+        #: Messages originating on the stream have their destination ID
+        #: recorded in this set by _async_route(). If a DEL_ROUTE is received
+        #: for such an ID, a copy will be forwarded to any stream that
+        #: previously conversed with the now-unroutable ID.
+        self.egress_ids = set()
         self.sent_modules = set(['mitogen', 'mitogen.core'])
         self.construct(**kwargs)
         self._input_buf = collections.deque()
@@ -1266,7 +1272,7 @@ def _unpickle_context(router, context_id, name):
                 (isinstance(name, UnicodeType) and len(name) < 100))
             ):
         raise TypeError('cannot unpickle Context: bad input')
-    return router.context_class(router, context_id, name)
+    return router.context_by_id(context_id, name)
 
 
 class Poller(object):
@@ -1744,7 +1750,7 @@ class Router(object):
                 return msg.is_dead or msg.src_id == respondent.context_id
             def on_disconnect():
                 if handle in self._handle_map:
-                    fn(Message.dead())
+                    fn(Message.dead(src_id=respondent.context_id))
                     del self._handle_map[handle]
             listen(respondent, 'disconnect', on_disconnect)
 
@@ -1813,6 +1819,7 @@ class Router(object):
                               self, msg.src_id, in_stream, expect, msg)
                     return
 
+            in_stream.egress_ids.add(msg.dst_id)
             if in_stream.auth_id is not None:
                 msg.auth_id = in_stream.auth_id
 

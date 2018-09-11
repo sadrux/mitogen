@@ -405,11 +405,7 @@ def config_from_hostvars(transport, inventory_name, connection,
 
 
 class CallChain(mitogen.parent.CallChain):
-    call_aborted_msg = (
-        'Mitogen was disconnected from the remote environment while a call '
-        'was in-progress. If you feel this is in error, please file a bug. '
-        'Original error was: %s'
-    )
+    call_aborted_msg = 'Disconnected while a request was in-flight: %s'
 
     def _rethrow(self, recv):
         try:
