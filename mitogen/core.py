@@ -1273,6 +1273,18 @@ class Poller(object):
     def __init__(self):
         self._rfds = {}
         self._wfds = {}
+        # Pollers return an array snapshot of ready descriptors at time of
+        # call. If Waker is ready in one snapshot, as is another FD, and the
+        # Waker.on_receive() runs first, and causes that FD to be discarded
+        # from the poller and closed, and subsequent events prior to iteration
+        # completing cause the FD to be reallocated to a new connection, and
+        # that connection is added to the poller, subsequent iteration of the
+        # array snapshot may produce readiness events intended for the old FD.
+        # Therefore when stop_receive() or stop_transmit() has been called,
+        # suppress related readiness events until next wake, as those may be
+        # invalid.
+        self._suppress_receive = set()
+        self._suppress_transmit = set()
 
     @property
     def readers(self):
@@ -1293,15 +1305,19 @@ class Poller(object):
 
     def stop_receive(self, fd):
         self._rfds.pop(fd, None)
+        self._suppress_receive.add(fd)
 
     def start_transmit(self, fd, data=None):
         self._wfds[fd] = data or fd
 
     def stop_transmit(self, fd):
         self._wfds.pop(fd, None)
+        self._suppress_transmit.add(fd)
 
     def poll(self, timeout=None):
         _vv and IOLOG.debug('%r.poll(%r)', self, timeout)
+        self._suppress_receive.clear()
+        self._suppress_transmit.clear()
         (rfds, wfds, _), _ = io_op(select.select,
             self._rfds,
             self._wfds,
@@ -1310,11 +1326,13 @@ class Poller(object):
 
         for fd in rfds:
             _vv and IOLOG.debug('%r: POLLIN for %r', self, fd)
-            yield self._rfds[fd]
+            if fd not in self._suppress_receive:
+                yield self._rfds[fd]
 
         for fd in wfds:
             _vv and IOLOG.debug('%r: POLLOUT for %r', self, fd)
-            yield self._wfds[fd]
+            if fd not in self._suppress_transmit:
+                yield self._wfds[fd]
 
 
 class Latch(object):

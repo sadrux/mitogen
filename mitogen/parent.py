@@ -626,21 +626,12 @@ class KqueuePoller(mitogen.core.Poller):
     _repr = 'KqueuePoller()'
 
     def __init__(self):
+        super(KQueuePoller, self).__init__()
         self._kqueue = select.kqueue()
-        self._rfds = {}
-        self._wfds = {}
         self._changelist = []
 
     def close(self):
         self._kqueue.close()
-
-    @property
-    def readers(self):
-        return list(self._rfds.items())
-
-    @property
-    def writers(self):
-        return list(self._wfds.items())
 
     def _control(self, fd, filters, flags):
         mitogen.core._vv and IOLOG.debug(
@@ -667,6 +658,7 @@ class KqueuePoller(mitogen.core.Poller):
         if fd in self._rfds:
             self._control(fd, select.KQ_FILTER_READ, select.KQ_EV_DELETE)
             del self._rfds[fd]
+        self._suppress_receive.add(fd)
 
     def start_transmit(self, fd, data=None):
         mitogen.core._vv and IOLOG.debug('%r.start_transmit(%r, %r)',
@@ -680,6 +672,7 @@ class KqueuePoller(mitogen.core.Poller):
         if fd in self._wfds:
             self._control(fd, select.KQ_FILTER_WRITE, select.KQ_EV_DELETE)
             del self._wfds[fd]
+        self._suppress_transmit.add(fd)
 
     def poll(self, timeout=None):
         changelist = self._changelist
@@ -704,21 +697,12 @@ class EpollPoller(mitogen.core.Poller):
     _repr = 'EpollPoller()'
 
     def __init__(self):
+        super(EpollPoller, self).__init__()
         self._epoll = select.epoll(32)
         self._registered_fds = set()
-        self._rfds = {}
-        self._wfds = {}
 
     def close(self):
         self._epoll.close()
-
-    @property
-    def readers(self):
-        return list(self._rfds.items())
-
-    @property
-    def writers(self):
-        return list(self._wfds.items())
 
     def _control(self, fd):
         mitogen.core._vv and IOLOG.debug('%r._control(%r)', self, fd)
@@ -743,6 +727,7 @@ class EpollPoller(mitogen.core.Poller):
     def stop_receive(self, fd):
         mitogen.core._vv and IOLOG.debug('%r.stop_receive(%r)', self, fd)
         self._rfds.pop(fd, None)
+        self._suppress_receive.add(fd)
         self._control(fd)
 
     def start_transmit(self, fd, data=None):
@@ -754,6 +739,7 @@ class EpollPoller(mitogen.core.Poller):
     def stop_transmit(self, fd):
         mitogen.core._vv and IOLOG.debug('%r.stop_transmit(%r)', self, fd)
         self._wfds.pop(fd, None)
+        self._suppress_transmit.add(fd)
         self._control(fd)
 
     _inmask = (getattr(select, 'EPOLLIN', 0) |
@@ -764,13 +750,17 @@ class EpollPoller(mitogen.core.Poller):
         if timeout is not None:
             the_timeout = timeout
 
+        self._suppress_receive.clear()
+        self._suppress_transmit.clear()
         events, _ = mitogen.core.io_op(self._epoll.poll, the_timeout, 32)
         for fd, event in events:
-            if event & self._inmask and fd in self._rfds:
+            if (event & self._inmask and fd in self._rfds and
+                    (fd not in self._suppress_receive)):
                 # Events can still be read for an already-discarded fd.
                 mitogen.core._vv and IOLOG.debug('%r: POLLIN: %r', self, fd)
                 yield self._rfds[fd]
-            if event & select.EPOLLOUT and fd in self._wfds:
+            if (event & select.EPOLLOUT and fd in self._wfds and
+                    (fd not in self._suppress_transmit)):
                 mitogen.core._vv and IOLOG.debug('%r: POLLOUT: %r', self, fd)
                 yield self._wfds[fd]
 
